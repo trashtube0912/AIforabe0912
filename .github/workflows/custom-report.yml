@@ -1,0 +1,39 @@
+name: 自訂市場分析任務
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: 報告標題
+        required: true
+        default: 自訂市場分析
+      request:
+        description: 想讓 AI 分析的內容或問題
+        required: true
+        default: 請整理今日市場值得注意的風險與機會。
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - run: python app.py custom --title "$TASK_TITLE" --request "$TASK_REQUEST"
+        env:
+          TASK_TITLE: '${{ inputs.title }}'
+          TASK_REQUEST: '${{ inputs.request }}'
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          TELEGRAM_BOT_TOKEN: '${{ secrets.TELEGRAM_BOT_TOKEN }}'
+          TELEGRAM_CHAT_ID: '${{ secrets.TELEGRAM_CHAT_ID }}'
+      - name: 儲存報告
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/reports/
+          git diff --staged --quiet || git commit -m 'reports: custom analysis'
+          git push
