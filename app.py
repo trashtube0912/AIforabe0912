@@ -1,131 +1,43 @@
-"""Cloud-only market reporting jobs, designed for GitHub Actions."""
-from __future__ import annotations
-
-import argparse
-import json
-import os
-import re
-import sys
-from datetime import datetime, timezone
+"""Cloud-only Taiwan market reports for GitHub Actions."""
+import argparse,json,os
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request,urlopen
 from zoneinfo import ZoneInfo
-
-import feedparser
-import yfinance as yf
-
-TZ = ZoneInfo("Asia/Taipei")
-ROOT = Path(__file__).parent
-REPORTS = ROOT / "docs" / "reports"
-
-TICKERS = {
-    "台灣加權指數": "^TWII", "S&P 500": "^GSPC", "NASDAQ": "^IXIC",
-    "費城半導體": "^SOX", "VIX": "^VIX", "美元／台幣": "TWD=X",
-}
-
-def fmt_change(value: float) -> str:
-    return f"{value:+.2f}%" if value == value else "資料不足"
-
-def market_snapshot() -> list[dict]:
-    result = []
-    for name, ticker in TICKERS.items():
-        try:
-            h = yf.Ticker(ticker).history(period="7d", interval="1d", auto_adjust=False)
-            close, previous = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
-            result.append({"name": name, "close": close, "change": (close / previous - 1) * 100})
-        except Exception as exc:
-            result.append({"name": name, "close": None, "change": float("nan"), "error": str(exc)})
-    return result
-
-def news_items() -> list[dict]:
-    seen, output = set(), []
-    for q in ("台股", "台灣 股市"):
-        feed = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
-        for entry in feed.entries:
-            title = re.sub(r"\s+-\s+[^-]+$", "", entry.get("title", ""))
-            if title and title not in seen:
-                seen.add(title)
-                output.append({"title": title, "link": entry.get("link", ""), "source": entry.get("source", {}).get("title", "")})
-            if len(output) >= 8:
-                return output
-    return output
-
-def ai_summary(prompt: str) -> str | None:
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        return None
-    from openai import OpenAI
-    response = OpenAI(api_key=key).responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), input=prompt,
-    )
-    return response.output_text.strip()
-
-def render_market(kind: str) -> str:
-    now = datetime.now(TZ)
-    snapshot, news = market_snapshot(), news_items()
-    lines = [f"# {'開盤前市場情緒分析' if kind == 'premarket' else '台股大盤盤後分析'}", "", f"> 產生時間：{now:%Y-%m-%d %H:%M}（台北時間）", "", "## 市場快照", "", "| 指標 | 最新收盤 | 變動 |", "|---|---:|---:|"]
-    for x in snapshot:
-        close = f"{x['close']:,.2f}" if x["close"] is not None else "資料不足"
-        lines.append(f"| {x['name']} | {close} | {fmt_change(x['change'])} |")
-    lines += ["", "## 相關新聞", ""]
-    lines += [f"- [{x['title']}]({x['link']})（{x['source']}）" for x in news] or ["- 暫無可用新聞來源。"]
-    raw = "\n".join(lines)
-    instruction = ("你是台灣市場研究助理。根據以下數字和新聞，以繁體中文寫 3 至 5 點客觀市場觀察，區分事實和推論，"
-                   "不可提供買賣指令，最後提醒『非投資建議』。\n\n" + raw)
-    analysis = ai_summary(instruction)
-    if analysis:
-        lines += ["", "## AI 觀察", "", analysis]
-    else:
-        lines += ["", "## AI 觀察", "", "尚未設定 OPENAI_API_KEY；此報告僅列出原始資料與新聞。"]
-    lines += ["", "---", "*本報告僅供資訊整理，非投資建議。市場資料可能延遲或有誤。*"]
-    return "\n".join(lines)
-
-def latest_podcast() -> tuple[dict | None, str | None]:
-    rss = os.getenv("PODCAST_RSS_URL", "").strip()
-    if not rss:
-        return None, "尚未設定 PODCAST_RSS_URL。"
-    feed = feedparser.parse(rss)
-    if not feed.entries:
-        return None, "RSS 沒有可用節目。"
-    e = feed.entries[0]
-    return {"title": e.get("title", "未命名節目"), "link": e.get("link", ""), "description": re.sub("<[^>]+>", "", e.get("summary", e.get("description", "")))}, None
-
-def render_podcast() -> str | None:
-    episode, error = latest_podcast()
-    if error:
-        print(error)
-        return None
-    prompt = ("請以繁體中文將以下 Podcast 節目資訊整理為：主題、重點（3-6 點）、提到的股票或產業（若無則明說）、"
-              "以及一段風險提示。不得補寫節目未提供的內容。\n\n" + json.dumps(episode, ensure_ascii=False))
-    summary = ai_summary(prompt) or "尚未設定 OPENAI_API_KEY，因此僅保留節目說明。\n\n" + episode["description"]
-    return f"# 股癌 Podcast 摘要\n\n> 產生時間：{datetime.now(TZ):%Y-%m-%d %H:%M}（台北時間）\n\n## [{episode['title']}]({episode['link']})\n\n{summary}\n\n---\n*本摘要根據節目 RSS 說明產生，非投資建議。*"
-
-def save_report(category: str, content: str) -> None:
-    now = datetime.now(TZ)
-    folder = REPORTS / category
-    folder.mkdir(parents=True, exist_ok=True)
-    filename = f"{now:%Y-%m-%d}-{category}.md"
-    path = folder / filename
-    path.write_text(content, encoding="utf-8")
-    index_path = REPORTS / "index.json"
-    items = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
-    item = {"title": content.splitlines()[0].lstrip("# ") + f"｜{now:%Y-%m-%d}", "path": str(path.relative_to(ROOT / "docs")).replace("\\", "/"), "created_at": now.isoformat()}
-    items = [x for x in items if x["path"] != item["path"]]
-    items.insert(0, item)
-    index_path.write_text(json.dumps(items[:100], ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Saved {path}")
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("job", choices=["premarket", "close", "podcast"])
-    job = parser.parse_args().job
-    if job == "podcast":
-        content = render_podcast()
-        if content is None:
-            return 0
-    else:
-        content = render_market(job)
-    save_report(job, content)
-    return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+import feedparser,yfinance as yf
+TZ=ZoneInfo("Asia/Taipei"); OUT=Path("docs/reports")
+T={"台灣加權":"^TWII","S&P 500":"^GSPC","NASDAQ":"^IXIC","費城半導體":"^SOX","VIX":"^VIX","美元／台幣":"TWD=X"}
+def market():
+ r=[]
+ for n,c in T.items():
+  try:
+   x=yf.Ticker(c).history(period="7d")["Close"];r+=[f"{n} {x.iloc[-1]:,.2f} ({(x.iloc[-1]/x.iloc[-2]-1)*100:+.2f}%)"]
+  except Exception as e:r+=[f"{n}: 資料失敗 ({e})"]
+ return "\n".join(r)
+def news():
+ f=feedparser.parse("https://news.google.com/rss/search?"+urlencode({"q":"台股 OR 台灣股市 when:1d","hl":"zh-TW","gl":"TW","ceid":"TW:zh-Hant"}))
+ return "\n".join("- "+x.title for x in f.entries[:12]) or "今日新聞資料不足"
+def ask(p):
+ k=os.getenv("OPENAI_API_KEY")
+ if not k:return "尚未設定 OPENAI_API_KEY，以下為原始資料。"
+ try:
+  q=Request("https://api.openai.com/v1/responses",json.dumps({"model":"gpt-4.1-mini","input":p}).encode(),{"Authorization":"Bearer "+k,"Content-Type":"application/json"})
+  return json.load(urlopen(q,timeout=60)).get("output_text") or "模型未回傳摘要。"
+ except Exception as e:return "AI 摘要失敗："+str(e)
+def send(title,text):
+ k,c=os.getenv("TELEGRAM_BOT_TOKEN"),os.getenv("TELEGRAM_CHAT_ID")
+ if not(k and c):return
+ try:
+  u=f"https://api.telegram.org/bot{k}/sendMessage";v={"chat_id":c,"text":title+"\n\n"+text[:3000]+"\n\n完整報告："+os.getenv("SITE_URL","https://trashtube0912.github.io/AIforabe0912/")};urlopen(Request(u,urlencode(v).encode(),{"Content-Type":"application/x-www-form-urlencoded"}),timeout=30)
+ except Exception as e:print("Telegram failed:",e)
+def save(kind,title,raw,summary):
+ OUT.mkdir(parents=True,exist_ok=True);now=datetime.now(TZ);stamp=now.strftime("%F-%H%M" if kind=="custom" else "%F");text=f"{title}\n\n{summary}\n\n原始資料\n{raw}"
+ (OUT/f"{kind}-{stamp}.html").write_text(f"<meta charset='utf-8'><main><h1>{title}</h1><p>{now:%F %R}（台北）</p><pre>{text}</pre></main>",encoding="utf8");send(title,text)
+def main():
+ p=argparse.ArgumentParser();p.add_argument("job",choices=["premarket","close","podcast","custom"]);p.add_argument("--title",default="自訂分析");p.add_argument("--request",default="");a=p.parse_args();m,n=market(),news()
+ if a.job=="custom":title,raw,prompt=a.title,"市場\n"+m+"\n\n新聞\n"+n,"請以繁體中文完成此任務："+a.request+"\n\n資料：\n"+m+"\n"+n
+ elif a.job=="podcast":title,raw,prompt="股癌 Podcast 摘要",n,"請根據以下公開新聞整理股癌 Podcast 市場脈絡；若缺本週逐字稿，請明確說明。\n"+n
+ else:title="開盤前市場情緒分析" if a.job=="premarket" else "每日股市大盤盤後分析";raw="市場\n"+m+"\n\n新聞\n"+n;prompt=f"請用繁體中文寫{title}，含重點、情緒、風險與觀察，不構成投資建議。\n"+raw
+ save(a.job,title,raw,ask(prompt))
+if __name__=="__main__":main()
