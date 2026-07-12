@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>市場情報中心</title>
+<style>body{font-family:system-ui,sans-serif;max-width:800px;margin:3rem auto;padding:0 1rem;color:#172033}a{color:#175cd3;text-decoration:none}li{margin:.65rem 0}.note{color:#667085}</style>
+<h1>市場情報中心</h1><p class="note">自動產生的開盤前情緒、台股盤後與 Podcast 摘要</p><ul id="reports"></ul>
+<script>fetch('reports/index.json').then(r=>r.json()).then(xs=>document.querySelector('#reports').innerHTML=xs.map(x=>`<li><a href="${x.path}">${x.title}</a><br><small>${x.created_at}</small></li>`).join('')).catch(()=>document.querySelector('#reports').textContent='尚無報告。')</script>
