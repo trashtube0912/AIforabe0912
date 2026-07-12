@@ -1,0 +1,26 @@
+name: 股癌 Podcast 摘要
+on:
+  schedule:
+    - cron: '0 11 * * 3,6' # 19:00 Asia/Taipei on Wed/Sat
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - run: python app.py podcast
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          PODCAST_RSS_URL: '${{ secrets.PODCAST_RSS_URL }}'
+      - name: 儲存報告
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/reports/
+          git diff --staged --quiet || git commit -m 'reports: podcast summary'
+          git push
